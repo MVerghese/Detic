@@ -22,6 +22,26 @@ from detic.config import add_detic_config
 
 from detic.predictor import VisualizationDemo
 
+
+
+class DeticObject:
+    def __init__ (self):
+        self.config_file = "configs/Detic_LCOCOI21k_CLIP_SwinB_896b32_4x_ft4x_max-size.yaml"
+        self.webcam = None
+        self.cpu = False
+        self.video_input = None
+        self.input = 'test.jpg'
+        self.output = 'out.jpg'
+        self.vocabulary = "custom"
+        self.custom_vocabulary = "saucepan, frying pan, spatula"
+        self.pred_all_class = False
+        self.confidence_threshold = 0.5
+        self.opts = []
+
+
+
+
+
 # Fake a video capture object OpenCV style - half width, half height of first screen using MSS
 class ScreenGrab:
     def __init__(self):
@@ -107,6 +127,7 @@ def get_parser():
         help="Modify config options using the command-line 'KEY VALUE' pairs",
         default=[],
         nargs=argparse.REMAINDER,
+        print("YOOOO ", nargs)
     )
     return parser
 
@@ -130,7 +151,7 @@ def test_opencv_video_format(codec, file_ext):
 
 if __name__ == "__main__":
     mp.set_start_method("spawn", force=True)
-    args = get_parser().parse_args(['--config-file', 'configs/Detic_LCOCOI21k_CLIP_SwinB_896b32_4x_ft4x_max-size.yaml', '--input', 'test.jpg' ,'--vocabulary', 'custom', '--custom_vocabulary', '"spatula in pan"',  '--opts', 'MODEL.WEIGHTS', 'models/Detic_LCOCOI21k_CLIP_SwinB_896b32_4x_ft4x_max-size.pth'])
+    args = get_parser().parse_args()
     setup_logger(name="fvcore")
     logger = setup_logger()
     logger.info("Arguments: " + str(args))
