@@ -24,17 +24,19 @@ import tqdm
 import sys
 import mss
 
-from detectron2.config import get_cfg
-from detectron2.data.detection_utils import read_image
-from detectron2.utils.logger import setup_logger
+# from detectron2.config import get_cfg
+# from detectron2.data.detection_utils import read_image
+# from detectron2.utils.logger import setup_logger
 
-sys.path.insert(0, 'third_party/CenterNet2/')
-from centernet.config import add_centernet_config
-from detic.config import add_detic_config
+# sys.path.insert(0, 'third_party/CenterNet2/')
+# from centernet.config import add_centernet_config
+# from detic.config import add_detic_config
 
-from detic.predictor import VisualizationDemo
-from PIL import Image
-import detic_module
+# from detic.predictor import VisualizationDemo
+# from PIL import Image
+# import detic_module
+
+import detic_interface
 
 
 
@@ -304,7 +306,7 @@ class FramePlot:
 
 
 class VisionNode:
-	def __init__(self,extrinsics,intrinsics,fixed_cameras,robot_camera,rvecs,camera_covariances,model_config="",model_weights="",load_detic=True, detic_lang_tags = None):
+	def __init__(self,extrinsics,intrinsics,fixed_cameras,robot_camera,rvecs,camera_covariances,save_path = "", model_config="",model_weights="",load_detic=False, detic_lang_tags = None):
 		self.pipelines = []
 		self.cam_configs = []
 		self.aligns = []
@@ -339,18 +341,62 @@ class VisionNode:
 		self.color_images = [None]*len(intrinsics)
 		self.depth_images = [None]*len(intrinsics)
 		self.depth_colormaps = [None]*len(intrinsics)
-		self.camera_rotations = [None,cv2.ROTATE_180]
+		self.detic_vis = [None]*len(intrinsics)
+		self.camera_rotations = [cv2.ROTATE_180, None]
 		self.stopped = False
 		if load_detic:
 			if not detic_lang_tags:
 				self.detic_lang_tags = ['spatula']
 			else:
 				self.detic_lang_tags = detic_lang_tags
-			self.detic = detic_module.DeticModule(self.detic_lang_tags,output_score_threshold=.3,load_clip=True)
+			self.detic = detic_interface.Predictor()
+			self.detic.setup(self.detic_lang_tags)
 
 		else:
 			self.detic = None
+
+		self.save_path = save_path
+		self.save_counter = 0
+		if self.save_path != "" and not os.path.exists(self.save_path):
+			os.makedirs(self.save_path)
 		
+		self._vision_thread = threading.Thread(target=self._vision_thread)
+		self._mutex = threading.Lock()
+
+	def _vision_thread(self):
+		while not self.stopped:
+			
+			self.update_frames(render_depth_colormap = True)
+			
+			self.render_camera_views()
+			self._mutex.acquire()
+			if self.save_path != "":
+				self.save_frames()
+			self._mutex.release()
+			time.sleep(.05)
+	
+	def save_frames(self):
+		for i in range(len(self.color_images)):
+			cv2.imwrite(os.path.join(self.save_path,"color_image_"+str(i).zfill(2)+"_"+str(self.save_counter).zfill(4)+".png"),self.color_images[i])
+		self.save_counter += 1
+
+	def start_recording(self,save_path):
+		self._mutex.acquire()
+		self.save_path = save_path
+		self.save_counter = 0
+		if not os.path.exists(self.save_path):
+			os.makedirs(self.save_path)
+		# delete any image files in the directory
+		for file in os.listdir(self.save_path):
+			if file.endswith(".png"):
+				os.remove(os.path.join(self.save_path,file))
+		self._mutex.release()
+
+	def stop_recording(self):
+		self._mutex.acquire()
+		self.save_path = ""
+		self.save_counter = 0
+		self._mutex.release()
 
 
 	def start_cameras(self,camera_ids,exposure=0,resolution=(640,480)):
@@ -369,8 +415,14 @@ class VisionNode:
 			self.cam_configs.append(cam_config)
 			self.aligns.append(align)
 
+		self._vision_thread.start()
+
+
+
 	def stop_cameras(self):
 		self.stopped = True
+		if self._vision_thread.is_alive():
+			self._vision_thread.join()
 		for pipeline in self.pipelines:
 			pipeline.stop()
 
@@ -393,7 +445,7 @@ class VisionNode:
 				self.depth_images[i] = cv2.rotate(self.depth_images[i],self.camera_rotations[i])
 
 			if render_depth_colormap:
-				depth_colormap = cv2.applyColorMap(cv2.convertScaleAbs(aligned_depth_image, alpha=0.5), cv2.COLORMAP_JET)
+				depth_colormap = cv2.applyColorMap(cv2.convertScaleAbs(self.depth_images[i], alpha=0.5), cv2.COLORMAP_JET)
 				self.depth_colormaps[i] = depth_colormap
 
 	def update_frames_threaded(self,render_depth_colormap = False,fps = 30.):
@@ -411,6 +463,11 @@ class VisionNode:
 		cv2.namedWindow('RealSense', cv2.WINDOW_NORMAL)
 		cv2.imshow('RealSense', images)
 		cv2.waitKey(1)
+
+	def get_camera_images(self):
+		while not np.any(self.color_images) or not np.any(self.depth_images):
+			time.sleep(.001)
+		return(self.color_images,self.depth_images)
 
 	def render_camera_views_cropped(self):
 		images = self.detic.get_image_crop(self.color_images[0])
@@ -449,7 +506,9 @@ class VisionNode:
 
 	def run_detection(self,cam,visualize=False,vis_length=0):
 		img = self.color_images[cam]
-		predictions = self.detic.run_detection(img,visualize=visualize,vis_length=vis_length)
+		predictions = self.detic.evaluate(img)
+		if visualize:
+			vis = self.detic.gen_vis(img,predictions)
 		return(predictions)
 
 
@@ -470,16 +529,60 @@ def run_vision(vis_node):
 	finally:
 		vis_node.stop_cameras()
 
+def create_vision_node():
+	camera_list = ['746612070227','242322071433']
+	extrinsics_3 = np.eye(4)
+	extrinsics_3[:3,3] = np.array([71.,-15.,30.])
+	intrinsics = {}
+	intrinsics['746612070227'] = intr_2
+	intrinsics['827312070621'] = intr_3
+	intrinsics['152122075556'] = intr_3
+	intrinsics['242322071433'] = intr_3
+
+	extrinsics = {}
+	extrinsics['746612070227'] = extrinsics_3
+	extrinsics['827312070621'] = extrinsics_3
+	extrinsics['152122075556'] = extrinsics_3
+	extrinsics['242322071433'] = extrinsics_3
+
+	rvec_1 = np.zeros(3)
+	theta_1 = np.sqrt(np.sum(rvec_1**2))
+	omega_1 = rvec_1/theta_1
+
+	# rvec_2 = np.load("rvec_2.npy")
+	rvec_2 = np.zeros(3)
+	theta_2 = np.sqrt(np.sum(rvec_2**2))
+	omega_2 = rvec_2/theta_2
+	vis_node = VisionNode([extrinsics[x] for x in camera_list],
+						  [intrinsics[x] for x in camera_list],
+						  [], # which camera is fixed
+						  2,
+						  [rvec_1, rvec_2],
+						  [cov_1,cov_2,cov_3],
+						  detic_lang_tags=['skillet','spatula'],
+						  save_path = "") # place the name of the objective here
+
+	vis_node.start_cameras(camera_list,exposure=200)
+	return(vis_node)
+
 
 
 def main():
+
+	vis_node = create_vision_node()
+	_ = input("Press enter to stop")
+	vis_node.stop_cameras()
+	sys.exit(0)
+
+
 	# v1 = np.array([0,0,1])
 	# v2 = np.array([0,-1/np.sqrt(2),-1/np.sqrt(2)])
 	# print(SO32Euler(so32SO3(computeVectorRot(v1,v2))))
 	# 1/0
 	camera_list = ['746612070227','827312070621','152122075556']
 	camera_list = ['827312070621','746612070227']
-
+	camera_list = ['242322071433']
+	camera_list = ['746612070227']
 
 	# extrinsics_1 = np.load("extrinsics_1.npy")
 	# extrinsics_2 = np.load("extrinsics_2.npy")
@@ -511,11 +614,11 @@ def main():
 	omega_2 = rvec_2/theta_2
 	vis_node = VisionNode([extrinsics[x] for x in camera_list],
 						  [intrinsics[x] for x in camera_list],
-						  [],
+						  [], # which camera is fixed
 						  2,
 						  [rvec_2],
 						  [cov_1,cov_2,cov_3],
-						  detic_lang_tags=['pizza','spoon'])
+						  detic_lang_tags=['skillet','spatula']) # place the name of the objective here
 	# vis_node.start_cameras(['827112072509','746612070227','827312070621'],exposure=0)
 	vis_node.start_cameras(camera_list,exposure=0)
 
@@ -595,7 +698,7 @@ def main():
 			# vis_node.estimate_coords(0)
 			# vis_node.estimate_coords(0)
 			vis_node.render_camera_views()
-			predictions = vis_node.run_detection(1,visualize=True,vis_length=10)
+			# predictions = vis_node.run_detection(0,visualize=True,vis_length=10)
 			# spatula_bbox = predictions['instances'].pred_boxes.tensor.cpu().numpy()[0]
 			# u = np.arange(spatula_bbox[1],spatula_bbox[3],dtype=int)
 			# v = np.arange(spatula_bbox[0],spatula_bbox[2],dtype=int)
